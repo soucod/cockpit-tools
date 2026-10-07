@@ -28,6 +28,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { confirm as confirmDialog } from "@tauri-apps/plugin-dialog";
 import { useEscClose } from "../../hooks/useEscClose";
+import { resolveStoredCompactLimitInput } from "../../utils/codexModelContext";
 import {
   saveCodexInstanceQuickConfig,
   saveCodexInstanceConfiguration,
@@ -188,6 +189,7 @@ interface ModelConfigSnapshot {
   enabled: boolean;
   models: CodexExperimentalModelDefinition[];
   defaultModelId: string | null;
+  routingRoutes: CodexInstanceApiRoute[];
 }
 
 interface ContextConfigSnapshot {
@@ -369,10 +371,16 @@ export function CodexLaunchPreviewModal({
     executing !== null;
   const configBusy = busy || checkingConfig || !configReady;
   const requestClose = useCallback(() => {
+    // 只把本弹框自己的子弹框（codex-launch-preview-* 系列）视为“还叠着一层”：
+    // 启动进度弹框、Windows 操作提示等全局弹框不是它的子级，不应该让「关闭」失效。
     const hasStackedModal = Array.from(
       document.querySelectorAll<HTMLElement>(".modal-overlay"),
-    ).some(
-      (element) => !element.classList.contains("codex-launch-preview-overlay"),
+    ).some((element) =>
+      Array.from(element.classList).some(
+        (className) =>
+          className.startsWith("codex-launch-preview-") &&
+          className !== "codex-launch-preview-overlay",
+      ),
     );
     if (!hasStackedModal) {
       // Invalidate pending read-before-write work synchronously, before React
@@ -410,7 +418,8 @@ export function CodexLaunchPreviewModal({
       contextWindow !== undefined || compactLimit !== undefined,
     );
     setContextWindowInput(contextWindow?.toString() ?? "");
-    setCompactLimitInput(compactLimit?.toString() ?? "");
+    // 存量配置里压缩阈值缺失、等于或超过上下文时按 90% 归一，避免带出非法配对。
+    setCompactLimitInput(resolveStoredCompactLimitInput(contextWindow, compactLimit));
     setModelsError(null);
   }, []);
 
@@ -775,7 +784,9 @@ export function CodexLaunchPreviewModal({
           experimentalModelCatalogDefaultModelId: nextCatalog.defaultModelId,
         });
         saved = result.quickConfig;
-        setLoadedInstanceKey(codexLaunchPreviewInstanceConfigKey(result.instance));
+        if (session === configSession.current) {
+          setLoadedInstanceKey(codexLaunchPreviewInstanceConfigKey(result.instance));
+        }
         useCodexInstanceStore.setState({
           instances: useCodexInstanceStore.getState().instances.map((item) =>
             item.id === result.instance.id ? result.instance : item),
@@ -791,6 +802,9 @@ export function CodexLaunchPreviewModal({
         );
       }
       rememberCodexLaunchPreviewConfig(instanceId, saved);
+      // A dispatched write may finish after Close. Keep shared snapshots current,
+      // but do not revive the dismissed preview or continue its launch/switch.
+      if (session !== configSession.current) return false;
       applyLoadedConfig(saved);
       setRoutingRoutes(normalizedRoutingRoutes);
       setNotice(routingDirty
@@ -858,8 +872,9 @@ export function CodexLaunchPreviewModal({
   const handleExecute = useCallback(
     async (launchAfterSwitch: boolean) => {
       if (configBusy) return;
+      const session = configSession.current;
       const saved = await persistDraft();
-      if (!saved) return;
+      if (!saved || session !== configSession.current) return;
       setExecuting(launchAfterSwitch ? "launch" : "switch");
       setNotice(null);
       setError(null);
@@ -875,10 +890,11 @@ export function CodexLaunchPreviewModal({
                   : [],
               }
             : undefined;
-        const started = await onExecute(launchAfterSwitch, launchOptions);
-        if (!started) setExecuting(null);
+        await onExecute(launchAfterSwitch, launchOptions);
       } catch (executeError) {
         setError(String(executeError).replace(/^Error:\s*/, ""));
+      } finally {
+        // 启动事务超时或长期不返回时，按钮不能永久停在“加载中”状态。
         setExecuting(null);
       }
     },
@@ -1110,9 +1126,10 @@ export function CodexLaunchPreviewModal({
 
   const openModelConfig = useCallback(async () => {
     if (configBusy || unavailable) return;
-    // 混合模型路由需要实例自己的可见模型清单，但不应替用户开启「模型管理」：
-    // 这种情况下只打开编辑器维护路由模型，开关状态保持不变。
-    if (!catalogEnabled && !routingEnabled) {
+    const session = configSession.current;
+    // Per-model edits require the catalog persistence policy. Ask explicitly even
+    // with mixed routing enabled, otherwise the backend discards the draft.
+    if (!catalogEnabled) {
       const confirmed = await confirmDialog(
         t("codex.modelManagement.enableConfirmDescription"),
         {
@@ -1122,7 +1139,7 @@ export function CodexLaunchPreviewModal({
           kind: "warning",
         },
       );
-      if (!confirmed) return;
+      if (!confirmed || session !== configSession.current) return;
     }
     setModelConfigSnapshot({
       enabled: catalogEnabled,
@@ -1133,10 +1150,13 @@ export function CodexLaunchPreviewModal({
           : undefined,
       })),
       defaultModelId,
+      routingRoutes: routingRoutes.map((route) => ({
+        ...route,
+        selectedModels: route.selectedModels?.slice(),
+        extraModels: route.extraModels?.slice(),
+      })),
     });
-    if (!routingEnabled) {
-      setCatalogEnabled(true);
-    }
+    setCatalogEnabled(true);
     setNotice(null);
     setError(null);
     setModelConfigOpen(true);
@@ -1145,8 +1165,9 @@ export function CodexLaunchPreviewModal({
     catalogEnabled,
     defaultModelId,
     models,
-    routingEnabled,
+    routingRoutes,
     setError,
+    t,
     unavailable,
   ]);
 
@@ -1161,9 +1182,10 @@ export function CodexLaunchPreviewModal({
       ) {
         return;
       }
+      const session = configSession.current;
       if (configReady) {
         const saved = await persistDraft();
-        if (!saved) return;
+        if (!saved || session !== configSession.current) return;
       }
       setChangingInstance(true);
       setNotice(null);
@@ -1182,20 +1204,18 @@ export function CodexLaunchPreviewModal({
   const closeModelConfig = useCallback(
     (apply: boolean) => {
       if (apply) {
-        // 混合模型路由下这里只应用路由模型改动，不替用户打开「模型管理」。
-        if (!routingEnabled) {
-          setCatalogEnabled(true);
-        }
+        setCatalogEnabled(true);
       } else if (modelConfigSnapshot) {
         setCatalogEnabled(modelConfigSnapshot.enabled);
         setModels(modelConfigSnapshot.models);
         setDefaultModelId(modelConfigSnapshot.defaultModelId);
+        setRoutingRoutes(modelConfigSnapshot.routingRoutes);
       }
       setModelConfigSnapshot(null);
       setModelConfigOpen(false);
       setModelsError(null);
     },
-    [modelConfigSnapshot, routingEnabled],
+    [modelConfigSnapshot],
   );
 
   const openContextConfig = useCallback(() => {
@@ -1291,6 +1311,7 @@ export function CodexLaunchPreviewModal({
         defaultModelId,
       );
       rememberCodexLaunchPreviewConfig(instanceId, saved);
+      if (session !== configSession.current) return;
       applyLoadedConfig(saved);
       setContextConfigSnapshot(null);
       setContextConfigOpen(false);
@@ -2008,7 +2029,7 @@ export function CodexLaunchPreviewModal({
                       {loading
                         ? t("common.loading", "加载中...")
                         : contextOverridePreset === "preset_516k"
-                          ? "516K / 460K"
+                          ? "516K / 464K"
                           : contextOverridePreset === "preset_1m"
                             ? "1M / 900K"
                             : contextOverridePreset === "custom"
@@ -2178,7 +2199,6 @@ export function CodexLaunchPreviewModal({
                   type="button"
                   className="btn btn-secondary"
                   onClick={requestClose}
-                  disabled={busy}
                 >
                   {t("common.close", "关闭")}
                 </button>

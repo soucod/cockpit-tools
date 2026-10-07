@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { presentProxyEnginePrerequisite, withProxyEnginePrerequisite } from '../utils/codexProxyEnginePrerequisite';
 import {
   CodexAccount,
   CodexAccountNoteUpdate,
@@ -14,10 +15,13 @@ import {
   CodexResetCreditsSnapshot,
 } from '../types/codex';
 import { normalizeCodexSwitchError } from '../utils/codexSwitchAuthFailure';
+import type { CodexOAuthProxyUse } from '../utils/codexOAuthReauthProxy';
 
 export interface CodexOAuthLoginStartResponse {
   loginId: string;
   authUrl: string;
+  /** 本次登录实际使用的出口；缺席表示走默认出口。 */
+  proxy?: CodexOAuthProxyUse;
 }
 
 export interface CodexDeviceAuthStartResponse {
@@ -40,6 +44,16 @@ export async function getCurrentCodexAccount(): Promise<CodexAccount | null> {
 /** 获取当前 Codex config.toml 路径 */
 export async function getCodexConfigTomlPath(): Promise<string> {
   return await invoke('get_codex_config_toml_path');
+}
+
+export interface CodexStoragePaths {
+  providerStorePath: string;
+  configPath: string;
+  authPath: string;
+}
+
+export async function getCodexStoragePaths(): Promise<CodexStoragePaths> {
+  return await invoke('get_codex_storage_paths');
 }
 
 /** 打开当前 Codex config.toml */
@@ -206,6 +220,7 @@ export async function switchCodexAccount(
     }
     return account;
   } catch (error) {
+    presentProxyEnginePrerequisite(error);
     if (String(error).includes('CODEX_START_CANCELLED')) {
       const cancelledPayload = {
         type: 'cancelled' as const,
@@ -468,8 +483,15 @@ export async function refreshCodexQuotasBatch(
 }
 
 /** 新 OAuth 流程：开始登录 */
-export async function startCodexOAuthLogin(): Promise<CodexOAuthLoginStartResponse> {
-  return await invoke('codex_oauth_login_start');
+/** `reauthAccountId` 仅在未显式提供 `proxyUrl` 时用于解析该账号的生效出口。 */
+export async function startCodexOAuthLogin(
+  proxyUrl?: string,
+  reauthAccountId?: string,
+): Promise<CodexOAuthLoginStartResponse> {
+  return await invoke('codex_oauth_login_start', {
+    proxyUrl: proxyUrl ?? null,
+    reauthAccountId: reauthAccountId ?? null,
+  });
 }
 
 /** 官方 Codex device-auth 流程：返回设备码并在后端轮询授权结果 */
@@ -675,6 +697,19 @@ export async function updateCodexAccountTags(
   tags: string[],
 ): Promise<CodexAccount> {
   return await invoke('update_codex_account_tags', { accountId, tags });
+}
+
+export async function updateCodexAccountEgressProxy(
+  accountId: string,
+  egressProxyUrl: string | null,
+  disabled = false,
+): Promise<CodexAccount> {
+  const request = invoke<CodexAccount>('update_codex_account_egress_proxy', {
+    accountId,
+    egressProxyUrl,
+    disabled,
+  });
+  return egressProxyUrl ? withProxyEnginePrerequisite(request) : request;
 }
 
 
