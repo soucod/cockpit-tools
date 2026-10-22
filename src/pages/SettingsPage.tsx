@@ -1,3 +1,4 @@
+import { resolveCodexAccountDisplayName } from "../utils/codexAccountDisplayName";
 import { ALL_CODEX_AUTO_REFRESH_PLAN_KEYS, sanitizeCodexAutoRefreshPlanKeys } from '../utils/codexAutoRefreshPlanScope';
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -229,7 +230,6 @@ interface GeneralConfig {
   hermes_auth_overwrite_on_switch?: boolean;
   codex_launch_on_switch: boolean;
   codex_auto_restore_takeover_on_launch?: boolean;
-  codex_preserve_verified_external_bridge?: boolean;
   antigravity_launch_on_switch: boolean;
   codex_restart_specified_app_on_switch: boolean;
   codex_local_access_entry_visible: boolean;
@@ -665,7 +665,6 @@ export function useSettingsPageController() {
   const [hermesAuthOverwriteOnSwitch, setHermesAuthOverwriteOnSwitch] = useState(false);
   const [codexLaunchOnSwitch, setCodexLaunchOnSwitch] = useState(true);
   const [codexAutoRestoreTakeoverOnLaunch, setCodexAutoRestoreTakeoverOnLaunch] = useState(true);
-  const [codexPreserveVerifiedExternalBridge, setCodexPreserveVerifiedExternalBridge] = useState(false);
   const [antigravityLaunchOnSwitch, setAntigravityLaunchOnSwitch] = useState(true);
   const [codexRestartSpecifiedAppOnSwitch, setCodexRestartSpecifiedAppOnSwitch] = useState(false);
   const [codexLocalAccessEntryVisible, setCodexLocalAccessEntryVisible] = useState(true);
@@ -791,11 +790,11 @@ export function useSettingsPageController() {
     () =>
       codexAccounts.map((account) => ({
         id: account.id,
-        label: account.email,
-        searchableText: account.email,
+        label: resolveCodexAccountDisplayName(account, t("common.apiKeyAccount")),
+        searchableText: [resolveCodexAccountDisplayName(account, t("common.apiKeyAccount")), account.email, account.api_base_url].join(" "),
         tags: account.tags || [],
       })),
-    [codexAccounts],
+    [codexAccounts, t],
   );
 
   useEffect(() => {
@@ -1153,7 +1152,6 @@ export function useSettingsPageController() {
       hermes_auth_overwrite_on_switch: hermesAuthOverwriteOnSwitch,
       codex_launch_on_switch: codexLaunchOnSwitch,
       codex_auto_restore_takeover_on_launch: codexAutoRestoreTakeoverOnLaunch,
-      codex_preserve_verified_external_bridge: codexPreserveVerifiedExternalBridge,
       antigravity_launch_on_switch: antigravityLaunchOnSwitch,
       codex_restart_specified_app_on_switch: codexRestartSpecifiedAppOnSwitch,
       codex_local_access_entry_visible: codexLocalAccessEntryVisible,
@@ -1389,7 +1387,6 @@ export function useSettingsPageController() {
     hermesAuthOverwriteOnSwitch,
     codexLaunchOnSwitch,
     codexAutoRestoreTakeoverOnLaunch,
-    codexPreserveVerifiedExternalBridge,
     antigravityLaunchOnSwitch,
     codexRestartSpecifiedAppOnSwitch,
     codexLocalAccessEntryVisible,
@@ -1775,7 +1772,6 @@ export function useSettingsPageController() {
       setHermesAuthOverwriteOnSwitch(config.hermes_auth_overwrite_on_switch ?? false);
       setCodexLaunchOnSwitch(config.codex_launch_on_switch ?? true);
       setCodexAutoRestoreTakeoverOnLaunch(config.codex_auto_restore_takeover_on_launch ?? true);
-      setCodexPreserveVerifiedExternalBridge(config.codex_preserve_verified_external_bridge ?? false);
       setAntigravityLaunchOnSwitch(config.antigravity_launch_on_switch ?? true);
       setCodexRestartSpecifiedAppOnSwitch(
         config.codex_restart_specified_app_on_switch ?? false,
@@ -2522,7 +2518,7 @@ export function useSettingsPageController() {
 
   const getAccountsForPlatform = (
     platform: CurrentAccountRefreshPlatform,
-  ): Array<{ id: string; email: string }> => {
+  ): Array<{ id: string; email: string; displayLabel?: string }> => {
     const getProviderAccounts = <T extends { id: string; email?: string | null }>(
       store: { getState: () => { accounts: T[] } },
       getDisplayEmail: (account: T) => string,
@@ -2544,7 +2540,7 @@ export function useSettingsPageController() {
       case 'antigravity':
         return antigravityAccounts.map((a) => ({ id: a.id, email: a.email }));
       case 'codex':
-        return codexAccounts.map((a) => ({ id: a.id, email: a.email }));
+        return codexAccounts.map((a) => ({ id: a.id, email: a.email, displayLabel: resolveCodexAccountDisplayName(a, t("common.apiKeyAccount")) }));
       case 'claude':
         return getProviderAccounts(useClaudeAccountStore, getClaudeAccountDisplayEmail);
       case 'ghcp':
@@ -2669,9 +2665,9 @@ export function useSettingsPageController() {
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
                       }}
-                      title={account.email}
+                      title={account.displayLabel || account.email}
                     >
-                      {account.email}
+                      {account.displayLabel || account.email}
                     </span>
                     {isCustomMode ? (
                       <div className="settings-inline-input" style={{ minWidth: '100px', width: 'auto' }}>
@@ -3294,8 +3290,6 @@ export function useSettingsPageController() {
     codexLaunchCandidates,
     codexLaunchOnSwitch,
     codexAutoRestoreTakeoverOnLaunch,
-    codexPreserveVerifiedExternalBridge,
-    setCodexPreserveVerifiedExternalBridge,
     setCodexAutoRestoreTakeoverOnLaunch,
     codexLocalAccessEntryVisible,
     codexQuotaAlertEnabled,

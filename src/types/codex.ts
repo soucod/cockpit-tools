@@ -73,7 +73,7 @@ export interface CodexQuickConfig {
   context_management_experimental_mode: boolean;
 }
 
-export type CodexAppSpeed = "standard" | "fast";
+export type CodexAppSpeed = "standard" | "fast" | "ultrafast";
 export type CodexFingerprintMode = "off" | "device" | "session" | "full";
 
 export interface CodexAppSpeedConfig {
@@ -83,6 +83,9 @@ export interface CodexAppSpeedConfig {
 
 /** Codex 账号数据 */
 export interface CodexAccount {
+  /** Fixed error code on a safe proxy target projection; never a credential URL. */
+  egress_proxy_error?: string | null;
+  egress_proxy_legacy_bound?: boolean;
   usage_updated_at?: number | null;
   id: string;
   email: string;
@@ -103,13 +106,18 @@ export interface CodexAccount {
   api_vision_routing_model?: string | null;
   api_instance_access_mode?: "gateway" | "direct" | "cdp" | string | null;
   api_startup_model?: string | null;
-  /** 网关模式下用于生图转发的 GPT(OAuth) 账号池。 */
+  /** 网关模式下用于生图转发的 OAuth / 图片 API Key 账号池。 */
   api_image_generation_account_ids?: string[] | null;
+  api_image_generation_account_models?: Record<string, string> | null;
   bound_oauth_account_id?: string | null;
   /** Grok 供应商账号绑定的 Grok 平台账号 ID：上游凭据来自该 Grok 账号（OAuth）。 */
   upstream_grok_account_id?: string | null;
   user_id?: string;
   plan_type?: string;
+  /** View-only subscription badge copied from an explicitly linked source. Never credentials or quota. */
+  service_source_plan_badge?: CodexPlanBadgePresentation;
+  /** Backend-owned historical service attribution; display only, never route authorization. */
+  api_service_source_account_id?: string;
   subscription_active_until?: string;
   subscription_query_last_attempt_at?: number;
   subscription_query_last_success_at?: number;
@@ -1027,6 +1035,11 @@ export function isCodexApiKeyAccount(account: CodexAccount): boolean {
   return (account.auth_mode || "").trim().toLowerCase() === "apikey";
 }
 
+/** A service reference to separate ChatGPT plan credentials, never a Codex login. */
+export function isCodexChatgptPlanAccount(account: CodexAccount): boolean {
+  return account.api_provider_id === "cockpit_chatgpt_plan";
+}
+
 export function isCodexPendingOAuthAccount(account?: CodexAccount | null): boolean {
   if (!account) return false;
   if ((account.authorization_status || "").trim().toLowerCase() === "pending") {
@@ -1097,6 +1110,7 @@ function normalizeCodexPlanKey(planType?: string): string {
 }
 
 function getCodexEffectivePlanKey(account: CodexAccount): string {
+  if (isCodexChatgptPlanAccount(account)) return "chatgpt_plan";
   const planKey = normalizeCodexPlanKey(account.plan_type);
   if (
     planKey === "free" ||
@@ -1178,6 +1192,7 @@ function getCodexProTier(account: CodexAccount): 100 | 200 | 500 {
 }
 
 function getCodexPlanBadgeLabel(account: CodexAccount): string {
+  if (isCodexChatgptPlanAccount(account)) return account.plan_type?.trim() || "ChatGPT";
   if (isCodexNewApiAccount(account)) {
     return account.plan_type?.trim() || "Cockpit Api";
   }
@@ -1194,10 +1209,12 @@ function getCodexPlanBadgeLabel(account: CodexAccount): string {
 }
 
 function getCodexPlanBadgeClass(account: CodexAccount): string {
+  const official = isCodexChatgptPlanAccount(account);
+  if (official && !account.plan_type?.trim()) return "api-key chatgpt-plan";
   if (isCodexNewApiAccount(account)) {
     return "api-key new-api-exclusive";
   }
-  const baseClass = getCodexEffectivePlanKey(account);
+  const baseClass = official ? normalizeCodexPlanKey(account.plan_type) : getCodexEffectivePlanKey(account);
   if (baseClass === "plus") {
     return "plus codex-plus";
   }
@@ -1224,6 +1241,7 @@ export function getCodexPlanBadgePresentation(
   account: CodexAccount,
   options?: { preserveRawNonProLabel?: boolean },
 ): CodexPlanBadgePresentation {
+  if (isCodexChatgptPlanAccount(account) && account.service_source_plan_badge) return { ...account.service_source_plan_badge };
   // Plan labels stay text; appearance is handled by the existing capsule styles.
   const label = options?.preserveRawNonProLabel && getCodexEffectivePlanKey(account) !== 'pro'
     ? account.plan_type?.trim() || account.auth_file_plan_type?.trim() || getCodexPlanBadgeLabel(account)
@@ -1249,6 +1267,7 @@ export function getCodexPlanBadgePresentationWithStyle(
 }
 
 export function getCodexPlanFilterKey(account: CodexAccount): string {
+  if (isCodexChatgptPlanAccount(account)) return "CHATGPT_PLAN";
   if (isCodexPendingOAuthAccount(account)) return "PENDING";
   return getCodexEffectivePlanKey(account).toUpperCase();
 }

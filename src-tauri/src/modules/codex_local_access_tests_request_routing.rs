@@ -72,17 +72,45 @@
     }
 
     #[test]
-    fn removed_ultrafast_is_not_injected_but_explicit_requests_are_preserved() {
+    fn ultrafast_default_is_injected_without_overriding_explicit_requests() {
         let mut request = json!({"model": "gpt-5.6-sol"});
         super::apply_default_service_tier_if_missing(&mut request, Some("ultrafast"));
-        assert!(request.get("service_tier").is_none());
+        assert_eq!(request["service_tier"], "ultrafast");
 
         super::apply_default_service_tier_if_missing(&mut request, Some("priority"));
-        assert_eq!(request["service_tier"], "priority");
+        assert_eq!(request["service_tier"], "ultrafast");
 
         let mut explicit = json!({"service_tier": "ultrafast"});
         super::apply_default_service_tier_if_missing(&mut explicit, Some("priority"));
         assert_eq!(explicit["service_tier"], "ultrafast");
+    }
+
+    #[test]
+    fn restored_fast_default_reaches_responses_compact_and_chat_without_overriding_client() {
+        for path in ["/v1/responses", "/v1/responses/compact", "/v1/chat/completions"] {
+            for configured_tier in [None, Some("priority"), Some("ultrafast")] {
+                for explicit in [None, Some("default"), Some("standard"), Some("fast"), Some("priority"), Some("flex"), Some("auto"), Some("ultrafast")] {
+                    let mut body = if path.contains("chat") {
+                        json!({"model":"custom-model", "messages":[{"role":"user", "content":"fixture"}]})
+                    } else {
+                        json!({"model":"custom-model", "input":"fixture"})
+                    };
+                    if let Some(tier) = explicit { body["service_tier"] = json!(tier); }
+                    let request = ParsedRequest {
+                        method: "POST".to_string(), target: path.to_string(),
+                        headers: HashMap::new(), body: serde_json::to_vec(&body).unwrap(),
+                    };
+                    let (prepared, _) = super::prepare_gateway_request_with_default_service_tier(request, configured_tier).unwrap();
+                    let forwarded: Value = serde_json::from_slice(&prepared.body).unwrap();
+                    let expected = match explicit {
+                        Some("fast") => Some("priority"),
+                        Some("standard") => Some("default"),
+                        _ => explicit.or(configured_tier),
+                    };
+                    assert_eq!(forwarded.get("service_tier").and_then(Value::as_str), expected, "{path} {configured_tier:?} {explicit:?}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -293,6 +321,8 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             client_instance_id: "instance-1".to_string(),
             request_kind: "text".to_string(),
             service_tier: None,
+            requested_service_tier: None,
+            response_service_tier: None,
             reasoning_effort: None,
             success: false,
             status: Some(200),
@@ -300,6 +330,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             error_message: Some("stream error: stream disconnected before completion: stream closed before response.completed/response.done, last_event=response.failed".to_string()),
             latency_ms: 1754,
             first_response_ms: None,
+            output_generation_ms: None,
             usage: SidecarUsageDetails::default(),
         };
 
@@ -307,6 +338,29 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             normalized_sidecar_error_category(&event).as_deref(),
             Some("upstream_response_failed")
         );
+    }
+
+    #[test]
+    fn typed_upstream_stream_failures_keep_their_category_and_are_not_client_cancellations() {
+        for (status, category, message) in [
+            (502, "upstream_stream_error", "unexpected EOF during chunk size line"),
+            (502, "upstream_stream_error", "connection reset by peer"),
+            (502, "incomplete_upstream_stream", "stream closed before response.completed"),
+            (408, "request_timeout", "read deadline exceeded"),
+            (504, "upstream_stream_timeout", "error decoding response body: timed out"),
+        ] {
+            let event: SidecarUsageEvent = serde_json::from_value(json!({
+                "success": false, "status": status, "errorCategory": category, "errorMessage": message,
+            })).unwrap();
+            assert!(!sidecar_usage_event_is_client_canceled(&event), "{category}: {message}");
+            assert_eq!(normalized_sidecar_error_category(&event).as_deref(), Some(category));
+            if status == 502 { assert!(!sidecar_usage_event_should_auto_restart(&event)); }
+        }
+        let canceled: SidecarUsageEvent = serde_json::from_value(json!({
+            "success": false, "status": 499, "errorCategory": "client_canceled", "errorMessage": "write tcp: broken pipe",
+        })).unwrap();
+        assert!(sidecar_usage_event_is_client_canceled(&canceled));
+        assert_eq!(normalized_sidecar_error_category(&canceled).as_deref(), Some("client_canceled"));
     }
 
     #[test]
@@ -1079,7 +1133,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             None,
             supported_codex_model_ids(),
         );
-        assert!(restricted.iter().any(|model| model == "gpt-5.5"));
+        assert!(!restricted.iter().any(|model| model == "gpt-5.5"));
         assert!(!restricted.iter().any(|model| model.starts_with("gpt-5.6-")));
     }
 
@@ -1176,7 +1230,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             method: "POST".to_string(),
             target: "/v1/chat/completions".to_string(),
             headers: HashMap::new(),
-            body: br#"{"model":"GPT-5.5","stream":true,"messages":[{"role":"user","content":"hello"}]}"#
+            body: br#"{"model":"GPT-5.6-SOL","stream":true,"messages":[{"role":"user","content":"hello"}]}"#
                 .to_vec(),
         };
 
@@ -1186,7 +1240,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             serde_json::from_slice(&prepared.body).expect("mapped body should be json");
         assert_eq!(
             mapped_body.get("model").and_then(Value::as_str),
-            Some("gpt-5.5")
+            Some("gpt-5.6-sol")
         );
         assert!(mapped_body.get("input").is_some());
         assert_eq!(mapped_body.get("store"), Some(&Value::Bool(false)));
@@ -1199,7 +1253,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             mapped_body
                 .get("parallel_tool_calls")
                 .and_then(Value::as_bool),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             mapped_body
@@ -1217,7 +1271,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
                 original_request_body: _,
             } => {
                 assert!(stream);
-                assert_eq!(requested_model, "gpt-5.5");
+                assert_eq!(requested_model, "gpt-5.6-sol");
             }
             _ => panic!("expected chat completions adapter"),
         }
@@ -1500,7 +1554,7 @@ data: {"type":"response.completed","response":{"id":"resp_123","usage":{"input_t
             serde_json::from_slice(&prepared.body).expect("mapped body should be json");
         assert_eq!(
             mapped_body.get("model").and_then(Value::as_str),
-            Some("gpt-5.5")
+            Some("gpt-5.6-luna")
         );
         assert_eq!(
             mapped_body
@@ -3260,7 +3314,6 @@ data: {"error":{"code":"server_error","type":"upstream","message":"stream aborte
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.5",
             ]
         );
     }

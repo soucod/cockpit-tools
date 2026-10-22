@@ -422,7 +422,7 @@ func (s *relayServer) handleOllamaProviderGatewayChat(c *gin.Context, gateway *p
 	}
 	upstreamModel := s.providerGatewayUpstreamModel(gateway, model)
 	if strings.TrimSpace(upstreamModel) == "" {
-		writeAPIError(c, http.StatusNotFound, fmt.Sprintf("model %s is not available for this provider gateway", model), "model_not_available")
+		writeAPIError(c, http.StatusNotFound, s.manifest.modelUnavailableMessage(model), "model_not_available")
 		return
 	}
 	if providerGatewayRequestHasVisionInput(body) && !providerGatewayModelSupportsVision(gateway, upstreamModel) {
@@ -623,11 +623,11 @@ func (s *ollamaStreamState) applyToolCallDeltas(toolCalls []any) {
 func (s *ollamaStreamState) finalChunk() gin.H {
 	message := gin.H{
 		"role":    "assistant",
-		"content": s.content,
+		"content": "",
 	}
-	if s.thinking != "" {
-		message["thinking"] = s.thinking
-	}
+	// Text and thinking have already been emitted as deltas. Only tool calls
+	// are accumulated until the final frame, so streaming clients receive each
+	// part of the assistant response exactly once.
 	if toolCalls := s.ollamaToolCalls(); len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 	}

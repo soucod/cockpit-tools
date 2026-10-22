@@ -186,6 +186,15 @@ fn import_account_struct(account: CodexAccount) -> Result<CodexAccount, String> 
             Some(account.api_model_context_windows.clone()),
         )?;
         let mut changed = false;
+        if !account.api_image_generation_account_ids.is_empty()
+            || !account.api_image_generation_account_models.is_empty()
+        {
+            api_acc.api_image_generation_account_ids = account.api_image_generation_account_ids.clone();
+            api_acc.api_image_generation_account_models = account.api_image_generation_account_models.clone();
+            let imported_id = api_acc.id.clone();
+            replace_api_image_source_reference(&mut api_acc, &account.id, &imported_id);
+            changed = true;
+        }
         if let Some(tags) = account.tags {
             api_acc.tags = Some(tags);
             changed = true;
@@ -1873,7 +1882,9 @@ pub fn export_accounts(account_ids: &[String]) -> Result<String, String> {
 }
 
 fn serialize_accounts_for_export(accounts: &[CodexAccount]) -> Result<String, String> {
-    serde_json::to_string_pretty(accounts).map_err(|e| format!("序列化失败: {}", e))
+    let exportable: Vec<&CodexAccount> = accounts.iter()
+        .filter(|account| !is_chatgpt_plan_account(account)).collect();
+    serde_json::to_string_pretty(&exportable).map_err(|e| format!("序列化失败: {}", e))
 }
 
 #[derive(serde::Serialize, Clone)]

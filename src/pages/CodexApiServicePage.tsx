@@ -1,3 +1,6 @@
+import { codexServiceOriginalAccounts } from "../utils/chatgptPlanOverview";
+import { useChatGptPlanOverview } from "../hooks/useChatGptPlanOverview";
+import { codexServiceRelatedEndpointIds } from "../utils/chatgptPlanOverview";
 import {
   useCallback,
   useEffect,
@@ -28,6 +31,9 @@ import {
   reconcileCodexApiKeyScopeAccountIds,
 } from "../utils/codexApiKeyAccountScope";
 import { resolveCodexApiServiceCompatibilityBaseUrls } from "../utils/codexApiServiceCompatibility";
+import { useCodexTimeoutSettingsNavigation } from "../hooks/useCodexTimeoutSettingsNavigation";
+import { useCodexApiServiceRestart } from "../hooks/useCodexApiServiceRestart";
+import { clearRecoveredCodexGatewayError } from "../utils/codexGatewayKeyRecovery";
 import * as codexLocalAccessService from "../services/codexLocalAccessService";
 import * as codexInstanceService from "../services/codexInstanceService";
 import {
@@ -71,9 +77,6 @@ import {
   summarizeCodexQuotaPool,
 } from "../utils/codexQuotaPool";
 import { filterCodexLocalAccessAccountIds } from "../utils/codexLocalAccessAccounts";
-import {
-  isCodexLocalAccessRiskNoticeDismissed,
-} from "../utils/codexLocalAccessRiskNotice";
 import { requestCodexOpenAddAccount } from "../utils/codexAddAccountRequest";
 import { scrollElementTo } from "../utils/reducedMotion";
 import { useCodexAccountOverviewMemberView } from "../hooks/useCodexAccountOverviewMemberView";
@@ -715,9 +718,11 @@ export function useCodexApiServicePageController() {
   const [testChatInput, setTestChatInput] = useState("");
   const [testDialogError, setTestDialogError] = useState("");
   const [portKilling, setPortKilling] = useState(false);
-  const [sidecarRestarting, setSidecarRestarting] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  useEffect(() => {
+    if (state) setError((current) => clearRecoveredCodexGatewayError(current, state));
+  }, [state]);
   const [copiedField, setCopiedField] = useState<CopyField | null>(null);
   const [keyVisible, setKeyVisible] = useState(false);
   const [portInput, setPortInput] = useState("");
@@ -774,7 +779,7 @@ export function useCodexApiServicePageController() {
   const [maxConcurrentImageRequestsDraft, setMaxConcurrentImageRequestsDraft] =
     useState("1");
   const [maxAccountConcurrencyDraft, setMaxAccountConcurrencyDraft] =
-    useState("0");
+    useState("2");
   const [accountConcurrencyWaitDraft, setAccountConcurrencyWaitDraft] =
     useState("120");
   const [requestLogPage, setRequestLogPage] = useState(1);
@@ -862,7 +867,8 @@ export function useCodexApiServicePageController() {
   );
   const totals = selectedStatsWindow?.totals;
   const memberIds = collection?.accountIds ?? [];
-  const localAccessAccounts = useMemo(() => accounts, [accounts]);
+  const planGrants = useChatGptPlanOverview(collection?.accountIds, collection?.officialAccountBindings);
+  const localAccessAccounts = useMemo(() => codexServiceOriginalAccounts(accounts, collection?.accountIds), [accounts, collection?.accountIds]);
   const memberAccounts = useMemo(
     () =>
       memberIds
@@ -904,8 +910,8 @@ export function useCodexApiServicePageController() {
     return next;
   }, [state?.accountHealth]);
   const quotaPoolSummary = useMemo(
-    () => summarizeCodexQuotaPool(memberAccounts),
-    [memberAccounts],
+    () => summarizeCodexQuotaPool(memberAccounts, { sourceAccounts: accounts, grants: planGrants.accounts, displaySourceIds: planGrants.displaySourceIds }),
+    [memberAccounts, accounts, planGrants.accounts, planGrants.displaySourceIds],
   );
   const baseUrl = state?.baseUrl || FALLBACK_BASE_URL;
   const displayBaseUrl =
@@ -914,7 +920,7 @@ export function useCodexApiServicePageController() {
   const clientBaseUrlHost = collection?.clientBaseUrlHost ?? "localhost";
   const routingStrategy = collection?.routingStrategy ?? "auto";
   const modelIds = state?.modelIds ?? [];
-  const exampleModelId = modelIds[0] ?? "gpt-5.5";
+  const exampleModelId = modelIds[0] ?? "gpt-5.6-sol";
   const exampleApiKey = collection?.apiKey || "<api-key>";
   const compatibilityBaseUrls = useMemo(
     () => resolveCodexApiServiceCompatibilityBaseUrls(displayBaseUrl),
@@ -1267,6 +1273,11 @@ export function useCodexApiServicePageController() {
       void reloadState();
     };
     window.addEventListener("codex-local-access-state-updated", onUpdated);
+    const onChatgptPlanUpdated = () => {
+      void fetchAccounts();
+      void reloadState();
+    };
+    window.addEventListener("chatgpt-plan-accounts-changed", onChatgptPlanUpdated);
     let disposed = false;
     let unlistenTauri: (() => void) | null = null;
     void listen("codex-local-access-state-updated", onUpdated).then((dispose) => {
@@ -1280,6 +1291,7 @@ export function useCodexApiServicePageController() {
       disposed = true;
       mountedRef.current = false;
       window.removeEventListener("codex-local-access-state-updated", onUpdated);
+      window.removeEventListener("chatgpt-plan-accounts-changed", onChatgptPlanUpdated);
       unlistenTauri?.();
     };
   }, [fetchAccounts, fetchCurrentAccount, reloadState]);
@@ -1539,7 +1551,7 @@ export function useCodexApiServicePageController() {
       String(collection?.maxConcurrentImageRequests ?? 1),
     );
     setMaxAccountConcurrencyDraft(
-      String(collection?.maxAccountConcurrency ?? 0),
+      String(collection?.maxAccountConcurrency ?? 2),
     );
     setAccountConcurrencyWaitDraft(
       formatSeconds(collection?.accountConcurrencyWaitMs ?? 120 * 1000),
@@ -1650,21 +1662,6 @@ export function useCodexApiServicePageController() {
 
   const handleToggleEnabled = async (fromDialog = false) => {
     if (!collection) return false;
-    if (!collection.enabled) {
-      const confirmed = await confirmDialog(
-        t(
-          "codex.localAccess.riskNotice.desc",
-          "当前 Codex API 服务相关功能，本质上属于代理转发使用方式。继续使用即表示您已知悉相关情况，并愿意自行承担可能产生的风险。",
-        ),
-        {
-          title: t("codex.localAccess.riskNotice.title", "使用风险提示"),
-          kind: "warning",
-          okLabel: t("codex.localAccess.riskNotice.continueStart", "继续启动"),
-          cancelLabel: t("common.cancel", "取消"),
-        },
-      );
-      if (!confirmed) return false;
-    }
     return runAction(
       async () => {
         const next = await codexLocalAccessService.setCodexLocalAccessEnabled(
@@ -1724,25 +1721,6 @@ export function useCodexApiServicePageController() {
       );
       if (!confirmedEnableAndSwitch) return;
     }
-    if (!isCodexLocalAccessRiskNoticeDismissed()) {
-      const confirmedRisk = await confirmDialog(
-        t(
-          "codex.localAccess.riskNotice.desc",
-          "当前 Codex API 服务相关功能，本质上属于代理转发使用方式。继续使用即表示您已知悉相关情况，并愿意自行承担可能产生的风险。",
-        ),
-        {
-          title: t("codex.localAccess.riskNotice.title", "使用风险提示"),
-          kind: "warning",
-          okLabel: t(
-            "codex.localAccess.riskNotice.continueSwitch",
-            "继续切号",
-          ),
-          cancelLabel: t("common.cancel", "取消"),
-        },
-      );
-      if (!confirmedRisk) return;
-    }
-
     setActivating(true);
     setError("");
     setNotice("");
@@ -1753,7 +1731,7 @@ export function useCodexApiServicePageController() {
       await fetchCurrentAccount();
       await refreshApiServiceCurrent();
       setNotice(
-        t("codex.localAccess.activateSuccess", "已切换到 API 服务"),
+        next.recovering ? "" : t("codex.localAccess.activateSuccess", "已切换到 API 服务"),
       );
     } catch (err) {
       if (!mountedRef.current) return;
@@ -1962,49 +1940,20 @@ export function useCodexApiServicePageController() {
     }
   };
 
-  const handleRestartSidecar = async () => {
-    const confirmed = await confirmDialog(
-      t(
-        "codex.localAccess.restartConfirmMessage",
-        "将仅重启 API 服务 Sidecar，不修改账号、Token、API Key 或账号池配置。正在进行中的请求可能中断，确认继续吗？",
-      ),
-      {
-        title: t("codex.localAccess.restartTitle", "重启 API 服务"),
-        kind: "warning",
-        okLabel: t("codex.localAccess.restartAction", "重启 Sidecar"),
-        cancelLabel: t("common.cancel", "取消"),
-      },
-    );
-    if (!confirmed) return;
-    setSidecarRestarting(true);
-    setError("");
-    setNotice("");
-    try {
-      const next =
-        await codexLocalAccessService.restartCodexLocalAccessSidecar();
-      setState(next);
-      setNotice(
-        t("codex.localAccess.restartSuccess", "API 服务 Sidecar 已重启"),
-      );
-    } catch (err) {
-      if (
-        presentWindowsOperationError({
-          error: err,
-          operation: "start_sidecar",
-          summary: t("codex.localAccess.restartTitle", "重启 API 服务"),
-          retry: async () => {
-            const next = await codexLocalAccessService.restartCodexLocalAccessSidecar();
-            setState(next);
-          },
-        })
-      ) {
-        return;
-      }
-      setError(String(err).replace(/^Error:\s*/, ""));
-    } finally {
-      setSidecarRestarting(false);
-    }
-  };
+  const { restarting: sidecarRestarting, restart: handleRestartSidecar } = useCodexApiServiceRestart({
+    t, onState: setState, onError: setError, onNotice: setNotice,
+    presentError: (error, retry) => presentWindowsOperationError({
+      error, operation: "start_sidecar",
+      summary: t("codex.localAccess.restartTitle"), retry,
+    }),
+  });
+
+  const { openTimeoutSettings, timeoutFocusField, timeoutFieldRef } = useCodexTimeoutSettingsNavigation(() => {
+    setTimeoutsError("");
+    setSelectedTimeoutPresetId(collection?.activeTimeoutPresetId || "long_wait");
+    setTimeoutPresetNameDraft("");
+    setTimeoutDrafts(timeoutDraftsFromValue(collection?.timeouts));
+  }, () => setTimeoutsModalOpen(true));
 
   const handleUpdateAccessScope = async (value: string) => {
     const accessScope = value === "lan" ? "lan" : "localhost";
@@ -2055,6 +2004,9 @@ export function useCodexApiServicePageController() {
     backupAccountIds?: string[],
     preferredAccountIds?: string[],
     imageGenerationAccountPolicies?: Record<string, CodexLocalAccessImageGenerationPolicy>,
+    officialAccountBindings?: Record<string, string>,
+    sessionAffinity?: boolean,
+    sessionAffinityTtlMs?: number,
   ) => {
     const filteredAccountIds =
       accountIds.length === 0
@@ -2063,6 +2015,7 @@ export function useCodexApiServicePageController() {
             accountIds,
             accounts,
             restrictFreeAccounts,
+            collection?.pausedAccountIds?.filter((id) => collection.accountIds.includes(id)),
           );
 
     if (accountIds.length > 0 && filteredAccountIds.length === 0) {
@@ -2087,9 +2040,10 @@ export function useCodexApiServicePageController() {
       restrictFreeAccounts,
       nextBackupAccountIds,
       nextPreferredAccountIds,
-      undefined,
-      undefined,
+      sessionAffinity,
+      sessionAffinityTtlMs,
       imageGenerationAccountPolicies,
+      officialAccountBindings,
     );
     setState(next);
     void fetchAccounts().catch((error) => {
@@ -2139,6 +2093,9 @@ export function useCodexApiServicePageController() {
     backupAccountIds?: string[],
     preferredAccountIds?: string[],
     imageGenerationAccountPolicies?: Record<string, CodexLocalAccessImageGenerationPolicy>,
+    officialAccountBindings?: Record<string, string>,
+    sessionAffinity?: boolean,
+    sessionAffinityTtlMs?: number,
   ) => {
     setBusy(true);
     setError("");
@@ -2150,6 +2107,9 @@ export function useCodexApiServicePageController() {
         backupAccountIds,
         preferredAccountIds,
         imageGenerationAccountPolicies,
+        officialAccountBindings,
+        sessionAffinity,
+        sessionAffinityTtlMs,
       );
       setNotice(t("codex.localAccess.saveSuccess", "API 服务集合已更新"));
     } catch (err) {
@@ -2189,9 +2149,9 @@ export function useCodexApiServicePageController() {
 
   const handleRemoveMember = async (accountId: string) => {
     if (!collection) return;
-    const remainingIds = collection.accountIds.filter(
-      (item) => item !== accountId,
-    );
+    const row = localAccessAccounts.find((account) => account.id === accountId);
+    const removedIds = new Set(row ? codexServiceRelatedEndpointIds(row, localAccessAccounts) : [accountId]);
+    const remainingIds = collection.accountIds.filter((item) => !removedIds.has(item));
     const remainingSet = new Set(remainingIds);
     const backupAccountIds = (collection.customRoutingRules ?? [])
       .filter((rule) => rule.isBackup && remainingSet.has(rule.accountId))
@@ -3786,6 +3746,7 @@ export function useCodexApiServicePageController() {
     requestLogInstanceQuery,
     requestLogKindFilter,
     requestLogKindOptions,
+    requestLogLoaded: requestLogResult !== null,
     requestLogLoading,
     statsDetailsRefreshing,
     requestLogModelQuery,
@@ -3877,6 +3838,9 @@ export function useCodexApiServicePageController() {
     timeoutPresetNameDraft,
     timeoutPresetOptions,
     timeoutsError,
+    openTimeoutSettings,
+    timeoutFocusField,
+    timeoutFieldRef,
     timeoutsModalOpen,
     toggleApiKeyPolicyExpanded,
     toggleStringSelection,

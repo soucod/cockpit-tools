@@ -2217,6 +2217,8 @@ export function useCodexModelProviderManagerController({
     const modelCapabilities = buildProviderModelVisionCapabilities(
       form.visionModelText,
       form.visionModelStates,
+      modelCatalog,
+      form.supportsVision,
     );
     const visionRoutingModel = form.visionRoutingModel.trim();
     const isCreate = !form.providerId;
@@ -2727,6 +2729,7 @@ export function useCodexModelProviderManagerController({
       buildCodexPlanFilterOptions(providerOauthTierCounts, {
         includeError: false,
         pendingLabel: t("codex.pendingAuth.badge", "待授权"),
+        chatgptPlanLabel: t("chatgptPlan.title"),
       }),
     [providerOauthTierCounts, t],
   );
@@ -3083,6 +3086,7 @@ export function useCodexModelProviderManagerController({
             launchOptions.deepSeekAccessMode,
             null,
             launchOptions.imageGenerationAccountIds ?? [],
+            launchOptions.imageGenerationAccountModels ?? {},
           );
         }
         const presetId = resolveCodexApiProviderPresetId(preview.provider.baseUrl);
